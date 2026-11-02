@@ -1,0 +1,28 @@
+{
+  "run": {
+    "id": 41115104748,
+    "name": "Mobile End-to-end Build and Test",
+    "status": "pending",
+    "conclusion": null,
+    "event": "push",
+    "created_at": "2026-10-30T19:25:13Z",
+    "updated_at": "2026-10-30T19:25:14Z"
+  },
+  "jobs": [
+    {
+      "id": 124279935975,
+      "run_id": 41115104748,
+      "workflow_name": "Mobile End-to-end Build and Test",
+      "name": "Decide mobile E2E policy",
+      "status": "queued",
+      "conclusion": null,
+      "labels": [
+        "fire-1x2"
+      ],
+      "runner_id": 0,
+      "runner_name": "",
+      "created_at": "2026-10-30T19:52:47Z",
+      "started_at": "2026-10-30T19:52:47Z"
+    }
+  ]
+}
