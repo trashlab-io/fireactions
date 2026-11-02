@@ -389,6 +389,14 @@ Create `/etc/fireactions/config.yaml` with your specific values:
 # Address where Fireactions will listen (change to 0.0.0.0:8080 for external access)
 bind_address: 127.0.0.1:8080
 
+# Enable built-in on-demand scaling from GitHub workflow_job events
+on_demand: false
+
+# Optional global host capacity limits across all pools
+capacity:
+  memory_limit_mib: 12288
+  vcpu_limit: 8
+
 # Prometheus metrics endpoint
 metrics:
   enabled: true
@@ -397,6 +405,7 @@ metrics:
 # GitHub App authentication
 github:
   app_id: YOUR_GITHUB_APP_ID
+  webhook_secret: YOUR_GITHUB_WEBHOOK_SECRET  # Required when on_demand=true
   app_private_key: |
     -----BEGIN RSA PRIVATE KEY-----
     YOUR_PRIVATE_KEY_CONTENT_HERE
@@ -415,7 +424,9 @@ pools:
     organization: YOUR_GITHUB_ORGANIZATION  # or use 'repository: owner/repo'
     labels:
     - self-hosted
+    - default
     - fireactions
+    # When on_demand=true, labels must include the pool name
     # Add more labels to target specific workflows
     # - gpu
     # - large-runner

@@ -16,6 +16,28 @@ Example configuration file with all available options:
 bind_address: 0.0.0.0:8080
 
 #
+# Enable built-in on-demand scaling from GitHub workflow_job events.
+#
+# Default: false
+#
+on_demand: false
+
+#
+# Global host capacity limits across all pools.
+#
+capacity:
+  #
+  # Maximum total guest memory Fireactions may reserve across all running and in-flight VMs.
+  # 0 disables the limit.
+  #
+  memory_limit_mib: 12288
+  #
+  # Maximum total guest vCPUs Fireactions may reserve across all running and in-flight VMs.
+  # 0 disables the limit.
+  #
+  vcpu_limit: 8
+
+#
 # Metrics server configuration. This is used to expose Prometheus metrics on endpoint `/metrics`.
 #
 metrics:
@@ -28,6 +50,15 @@ metrics:
   # The address to listen on for HTTP requests.
   #
   address: 127.0.0.1:8081
+
+  #
+  # Optional Prometheus file_sd target generation for node_exporter processes
+  # running inside active VMs.
+  #
+  vm_node_exporter:
+    enabled: false
+    port: 9100
+    targets_dir: /var/lib/fireactions/prometheus-targets
 
 #
 # GitHub configuration.
@@ -45,6 +76,11 @@ github:
   #
   # Default: 0
   app_id: 12345
+  #
+  # GitHub webhook secret used to validate workflow_job webhooks.
+  # Required when on_demand is enabled.
+  #
+  webhook_secret: your-webhook-secret
 
 #
 # Pools configuration.
@@ -106,6 +142,10 @@ pools:
     - self-hosted
     - fireactions-2vcpu-2gb
     - fireactions
+    #
+    # When on_demand is enabled, labels must include the pool name so Fireactions
+    # can map queued jobs to exactly one pool.
+    #
   #
   # Firecracker configuration.
   #
@@ -128,6 +168,20 @@ pools:
     # Default: "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules rw"
     #
     kernel_args: "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules rw"
+    #
+    # Optional Firecracker CPU configuration passed to the pre-boot /cpu-config API.
+    # This can expose or mask CPUID/MSR/KVM capability bits for specialized guests.
+    #
+    # Default: {}
+    #
+    cpu_config:
+      cpuid_modifiers:
+      - leaf: "0x80000001"
+        subleaf: "0x0"
+        flags: 0
+        modifiers:
+        - register: ecx
+          bitmap: "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx1xx"
     #
     # Firecracker machine configuration.
     #

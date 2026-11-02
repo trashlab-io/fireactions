@@ -252,6 +252,10 @@ EOF
   cat <<EOF > /etc/fireactions/config.yaml
 bind_address: 127.0.0.1:8080
 
+capacity:
+  memory_limit_mib: 12288
+  vcpu_limit: 8
+
 metrics:
   enabled: true
   address: 127.0.0.1:8081

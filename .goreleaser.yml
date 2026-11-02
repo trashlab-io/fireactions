@@ -35,6 +35,7 @@ dockers:
   build_flag_templates:
   - "--pull"
   - "--platform=linux/amd64"
+  skip_push: "{{ .Env.GORELEASER_DOCKER_SKIP_PUSH }}"
   goarch: amd64
 - id: fireactions-arm64
   use: buildx
@@ -46,6 +47,7 @@ dockers:
   build_flag_templates:
   - "--pull"
   - "--platform=linux/arm64"
+  skip_push: "{{ .Env.GORELEASER_DOCKER_SKIP_PUSH }}"
   goarch: arm64
 
 docker_manifests:
@@ -53,10 +55,12 @@ docker_manifests:
   image_templates:
   - ghcr.io/hostinger/fireactions:{{ .Version }}-amd64
   - ghcr.io/hostinger/fireactions:{{ .Version }}-arm64
+  skip_push: "{{ .Env.GORELEASER_DOCKER_SKIP_PUSH }}"
 - name_template: ghcr.io/hostinger/fireactions:latest
   image_templates:
   - ghcr.io/hostinger/fireactions:{{ .Version }}-amd64
   - ghcr.io/hostinger/fireactions:{{ .Version }}-arm64
+  skip_push: "{{ .Env.GORELEASER_DOCKER_SKIP_PUSH }}"
 
 # Changelog is managed by release-please
 changelog:

@@ -15,7 +15,18 @@ func TestNewClient(t *testing.T) {
 }
 
 func TestClient_GetMetadata_Failure(t *testing.T) {
-	client := NewClient()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+
+	previousAddress := defaultMMDSAddress
+	defaultMMDSAddress = server.URL
+	defer func() {
+		defaultMMDSAddress = previousAddress
+	}()
+
+	client := NewClient(WithHTTPClient(server.Client()))
 	_, err := client.GetMetadata(context.Background(), "/")
 	assert.Error(t, err)
 }
@@ -42,7 +53,7 @@ func TestClient_GetMetadata_Success(t *testing.T) {
 	defer server.Close()
 	defaultMMDSAddress = server.URL
 
-	client := NewClient()
+	client := NewClient(WithHTTPClient(server.Client()))
 	metadata, err := client.GetMetadata(context.Background(), "test")
 	assert.NoError(t, err)
 	assert.Equal(t, "mock-token", client.token)
@@ -70,7 +81,7 @@ func TestClient_GetMetadata_Unauthorized(t *testing.T) {
 	defer server.Close()
 	defaultMMDSAddress = server.URL
 
-	client := NewClient()
+	client := NewClient(WithHTTPClient(server.Client()))
 	_, err := client.GetMetadata(context.Background(), "test")
 	assert.Error(t, err)
 }
@@ -92,7 +103,7 @@ func TestClient_GetMetadata_Unknown(t *testing.T) {
 	defer server.Close()
 	defaultMMDSAddress = server.URL
 
-	client := NewClient()
+	client := NewClient(WithHTTPClient(server.Client()))
 	_, err := client.GetMetadata(context.Background(), "test")
 	assert.Error(t, err)
 }

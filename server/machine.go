@@ -17,16 +17,27 @@ import (
 type Machine struct {
 	*firecracker.Machine
 
-	Name      string
-	RunnerID  int64
-	Pool      string
-	CreatedAt time.Time
+	Name         string
+	RunnerID     int64
+	Pool         string
+	Organization string
+	ProcessID    int
+	CreatedAt    time.Time
+	MemoryMib    int64
+	VCPUCount    int64
+	WorkflowName string
+	JobName      string
+	Reservation  *CapacityReservation
 
-	vsockCID    uint32
-	vsockPath   string
-	leaseCancel func(context.Context) error // containerd lease cancel function
-	vmmCtx      context.Context
-	vmmCancel   context.CancelFunc
+	vsockCID      uint32
+	vsockPath     string
+	leaseCancel   func(context.Context) error // containerd lease cancel function
+	vmmCtx        context.Context
+	vmmCancel     context.CancelFunc
+	waitFunc      func(context.Context) error
+	runnerStateFn func(context.Context) (string, error)
+	stopFunc      func() error
+	stopping      bool
 }
 
 func (m *Machine) ConnectToGuestAgent(ctx context.Context) (*grpc.ClientConn, agentv1.AgentServiceClient, error) {
@@ -51,9 +62,66 @@ func (m *Machine) ConnectToGuestAgent(ctx context.Context) (*grpc.ClientConn, ag
 
 func (m *Machine) GetAddr() string {
 	addr := ""
-	if len(m.Cfg.NetworkInterfaces) > 0 {
+	if m.Machine != nil && len(m.Cfg.NetworkInterfaces) > 0 {
 		addr = m.Cfg.NetworkInterfaces[0].StaticConfiguration.IPConfiguration.IPAddr.IP.String()
 	}
 
 	return addr
+}
+
+func (m *Machine) WaitForExit(ctx context.Context) error {
+	if m.waitFunc != nil {
+		return m.waitFunc(ctx)
+	}
+
+	if m.Machine == nil {
+		return nil
+	}
+
+	return m.Wait(ctx)
+}
+
+func (m *Machine) GetRunnerState(ctx context.Context) (string, error) {
+	if m.runnerStateFn != nil {
+		return m.runnerStateFn(ctx)
+	}
+
+	conn, client, err := m.ConnectToGuestAgent(ctx)
+	if err != nil {
+		return "", fmt.Errorf("connect to agent: %w", err)
+	}
+	defer conn.Close()
+
+	resp, err := client.GetRunnerState(ctx, &agentv1.GetRunnerStateRequest{})
+	if err != nil {
+		return "", fmt.Errorf("agent GetRunnerState: %w", err)
+	}
+
+	return resp.GetState(), nil
+}
+
+func (m *Machine) IsIdleForScaleDown(ctx context.Context) (bool, string, error) {
+	state, err := m.GetRunnerState(ctx)
+	if err != nil {
+		return false, "", err
+	}
+
+	switch state {
+	case "Idle", "Completed", "Exited", "Error":
+		return true, state, nil
+	default:
+		return false, state, nil
+	}
+}
+
+func (m *Machine) Stop() error {
+	if m.stopFunc != nil {
+		return m.stopFunc()
+	}
+
+	if m.Machine == nil {
+		return nil
+	}
+
+	return m.StopVMM()
 }

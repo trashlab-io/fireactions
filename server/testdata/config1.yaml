@@ -34,6 +34,14 @@ pools:
     binary_path: firecracker
     kernel_image_path: /var/lib/fireactions/vmlinux
     kernel_args: "console=ttyS0 noapic reboot=k panic=1 pci=off nomodules rw"
+    cpu_config:
+      cpuid_modifiers:
+      - leaf: "0x80000001"
+        subleaf: "0x0"
+        flags: 0
+        modifiers:
+        - register: ecx
+          bitmap: "0bxxxxxxxxxxxxxxxxxxxxxxxxxxxxx1xx"
     machine_config:
       mem_size_mib: 2048
       vcpu_count: 2

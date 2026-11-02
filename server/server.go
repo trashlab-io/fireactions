@@ -23,19 +23,21 @@ import (
 // Server represents the Fireactions server.
 type Server struct {
 	serverv1.UnimplementedServerServiceServer
-	config        *Config
-	pools         map[string]*Pool
-	grpcServer    *grpc.Server
-	metricsServer *http.Server
-	github        *github.Client
-	containerd    *containerd.Client
-	imageManager  *imageManager
-	l             *sync.Mutex
-	logger        *zerolog.Logger
-	nextCID       atomic.Uint32 // Global VSOCK CID counter (starts at 3)
-	version       string        // Version info for GetVersion RPC
-	commit        string
-	date          string
+	config       *Config
+	pools        map[string]*Pool
+	grpcServer   *grpc.Server
+	httpServer   *http.Server
+	github       *github.Client
+	containerd   *containerd.Client
+	imageManager *imageManager
+	capacity     *CapacityManager
+	onDemand     *onDemandController
+	l            *sync.Mutex
+	logger       *zerolog.Logger
+	nextCID      atomic.Uint32 // Global VSOCK CID counter (starts at 3)
+	version      string        // Version info for GetVersion RPC
+	commit       string
+	date         string
 }
 
 // Opt is a functional option for Server.
@@ -82,6 +84,7 @@ func New(config *Config, opts ...Opt) (*Server, error) {
 		pools:      make(map[string]*Pool),
 		github:     github,
 		containerd: containerdClient,
+		capacity:   NewCapacityManager(config.Capacity),
 		l:          &sync.Mutex{},
 		logger:     &logger,
 		version:    fireactions.Version,
@@ -104,19 +107,24 @@ func New(config *Config, opts ...Opt) (*Server, error) {
 	// Enable reflection for grpcurl debugging
 	reflection.Register(grpcServer)
 
-	// Setup metrics server (HTTP) for Prometheus
-	if config.Metrics.Enabled {
-		metricsHandler := http.NewServeMux()
-		metricsHandler.Handle("/metrics", promhttp.Handler())
-		metricsServer := &http.Server{
+	if config.Metrics.Enabled || config.OnDemand {
+		httpHandler := http.NewServeMux()
+		if config.Metrics.Enabled {
+			httpHandler.Handle("/metrics", promhttp.Handler())
+		}
+		httpServer := &http.Server{
 			Addr:         config.Metrics.Address,
-			Handler:      metricsHandler,
+			Handler:      httpHandler,
 			ReadTimeout:  15 * time.Second,
 			WriteTimeout: 15 * time.Second,
 			IdleTimeout:  60 * time.Second,
 		}
 
-		s.metricsServer = metricsServer
+		s.httpServer = httpServer
+		if config.OnDemand {
+			s.onDemand = newOnDemandController(s)
+			httpHandler.HandleFunc("/webhooks/github", s.onDemand.HandleGitHubWebhook)
+		}
 	}
 
 	return s, nil
@@ -133,8 +141,25 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = listener.Close()
 	}()
 
+	if s.capacity.Enabled() {
+		snapshot := s.capacity.Snapshot()
+		s.logger.Info().
+			Int64("memory_limit_mib", snapshot.MemoryLimitMib).
+			Int64("vcpu_limit", snapshot.VCPULimit).
+			Msg("Global capacity limiter enabled")
+	} else {
+		s.logger.Info().Msg("Global capacity limiter disabled")
+	}
+	if s.config.OnDemand {
+		s.logger.Info().Msg("On-demand scaling enabled")
+	}
+
+	if err := clearVMNodeExporterTargets(s.config.Metrics.VMNodeExporter); err != nil {
+		return err
+	}
+
 	for _, poolConfig := range s.config.Pools {
-		pool, err := NewPool(s.logger, poolConfig, s.github, s.imageManager, s.containerd, &s.nextCID)
+		pool, err := NewPool(s.logger, poolConfig, s.github, s.imageManager, s.containerd, &s.nextCID, s.capacity, s.config.Metrics.VMNodeExporter)
 		if err != nil {
 			return fmt.Errorf("creating pool: %w", err)
 		}
@@ -143,16 +168,22 @@ func (s *Server) Run(ctx context.Context) error {
 		go pool.Run()
 		s.logger.Info().Msgf("Pool %s started", poolConfig.Name)
 	}
+	if s.onDemand != nil {
+		if err := s.onDemand.Initialize(ctx); err != nil {
+			return fmt.Errorf("initializing on-demand controller: %w", err)
+		}
+		s.onDemand.Run(ctx)
+	}
 
 	errGroup := &errgroup.Group{}
 	errGroup.Go(func() error { return s.grpcServer.Serve(listener) })
-	if s.metricsServer != nil {
+	if s.httpServer != nil {
 		metricsListener, err := net.Listen("tcp", s.config.Metrics.Address)
 		if err != nil {
 			return fmt.Errorf("failed to start metrics server: %w", err)
 		}
 
-		errGroup.Go(func() error { return s.metricsServer.Serve(metricsListener) })
+		errGroup.Go(func() error { return s.httpServer.Serve(metricsListener) })
 	}
 
 	go func() {
@@ -168,11 +199,20 @@ func (s *Server) Run(ctx context.Context) error {
 			s.logger.Info().Msgf("Pool %s stopped", name)
 		}
 
+		snapshot := s.capacity.Snapshot()
+		if snapshot.Outstanding > 0 {
+			s.logger.Warn().
+				Int("outstanding_reservations", snapshot.Outstanding).
+				Int64("reserved_memory_mib", snapshot.MemoryReservedMib).
+				Int64("reserved_vcpu", snapshot.VCPUReserved).
+				Msg("Outstanding global capacity reservations remain during shutdown")
+		}
+
 		cancelCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 
-		if s.config.Metrics.Enabled {
-			_ = s.metricsServer.Shutdown(cancelCtx)
+		if s.httpServer != nil {
+			_ = s.httpServer.Shutdown(cancelCtx)
 		}
 
 		// Gracefully stop gRPC server
@@ -202,6 +242,18 @@ func (s *Server) findPool(id string) (*Pool, error) {
 	return pool, nil
 }
 
+func (s *Server) snapshotPools() []*Pool {
+	s.l.Lock()
+	defer s.l.Unlock()
+
+	pools := make([]*Pool, 0, len(s.pools))
+	for _, pool := range s.pools {
+		pools = append(pools, pool)
+	}
+
+	return pools
+}
+
 func (s *Server) findMachine(id string) (*Machine, error) {
 	s.l.Lock()
 	defer s.l.Unlock()
@@ -216,4 +268,23 @@ func (s *Server) findMachine(id string) (*Machine, error) {
 	}
 
 	return nil, fmt.Errorf("machine not found: %s", id)
+}
+
+func (s *Server) ownsRunner(runnerID int64, runnerName string) bool {
+	for _, pool := range s.snapshotPools() {
+		pool.machinesMu.Lock()
+		for _, machine := range pool.machines {
+			if runnerID != 0 && machine.RunnerID == runnerID {
+				pool.machinesMu.Unlock()
+				return true
+			}
+			if runnerName != "" && machine.Name == runnerName {
+				pool.machinesMu.Unlock()
+				return true
+			}
+		}
+		pool.machinesMu.Unlock()
+	}
+
+	return false
 }

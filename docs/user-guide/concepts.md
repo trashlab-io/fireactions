@@ -36,3 +36,5 @@ pools:
 ```
 
 This will create a pool named `example` with 5 replicas for the GitHub runners. The runners will have the labels `self-hosted` and `fireactions`, and will use the specified Firecracker configuration.
+
+If multiple pools are configured, Fireactions can also enforce a server-wide `capacity` budget for total guest memory and vCPUs across all pools combined. In-flight VM creations count against that budget before the VM starts.

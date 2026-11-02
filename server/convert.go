@@ -20,9 +20,9 @@ func convertPoolToProto(ctx context.Context, pool *Pool) *serverv1.Pool {
 	return &serverv1.Pool{
 		Name:            pool.config.Name,
 		Organization:    pool.config.Runner.Organization,
-		Replicas:        int32(pool.GetReplicas()),
+		Replicas:        int32(pool.GetBaseReplicas()),
 		CurrentReplicas: int32(pool.GetCurrentSize()),
-		DesiredReplicas: int32(pool.GetReplicas()),
+		DesiredReplicas: int32(pool.GetDesiredReplicas()),
 		GroupId:         pool.config.Runner.GroupID,
 		Labels:          pool.config.Runner.Labels,
 		Image:           pool.config.Runner.Image,
@@ -41,21 +41,20 @@ func convertMachineToProto(ctx context.Context, machine *Machine) *serverv1.Mach
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	conn, client, err := machine.ConnectToGuestAgent(ctx)
+	runnerState, err := machine.GetRunnerState(ctx)
 	if err != nil {
 		m.RunnerState = "Unknown"
 		m.RunnerVersion = "Unknown"
 		return m
 	}
-	defer conn.Close()
+	m.RunnerState = runnerState
 
-	runnerStateResp, err := client.GetRunnerState(
-		ctx, &agentv1.GetRunnerStateRequest{})
+	conn, client, err := machine.ConnectToGuestAgent(ctx)
 	if err != nil {
-		m.RunnerState = "Unknown"
-	} else {
-		m.RunnerState = runnerStateResp.GetState()
+		m.RunnerVersion = "Unknown"
+		return m
 	}
+	defer conn.Close()
 
 	runnerVersionResp, err := client.GetRunnerVersion(
 		ctx, &agentv1.GetRunnerVersionRequest{})
