@@ -20,6 +20,12 @@ const (
 	onDemandCompletedJobWindow = 2 * onDemandReconcileInterval
 )
 
+// onDemandWorkflowRunStatuses lists the run statuses scanned for queued jobs.
+// GitHub can keep a run pending or waiting while one of its jobs is already
+// queued, so scanning only queued and in-progress runs misses that job.
+// The per-job status and pool checks still decide which jobs create demand.
+var onDemandWorkflowRunStatuses = []string{"queued", "in_progress", "pending", "waiting"}
+
 type repositoryCacheEntry struct {
 	repositories []*githubv63.Repository
 	expiresAt    time.Time
@@ -239,6 +245,8 @@ func (c *onDemandController) reconcile(ctx context.Context) time.Duration {
 func (c *onDemandController) reconcileOnce(ctx context.Context) error {
 	reconciledJobs := make(map[int64]*jobDemandEntry)
 	assignedElsewhere := make(map[int64]struct{})
+	// A run can change status between list calls and appear in two lists.
+	scannedRuns := make(map[int64]struct{})
 
 	for organization, installationID := range c.installationIDs {
 		repositories, err := c.cachedRepositories(ctx, installationID)
@@ -250,13 +258,18 @@ func (c *onDemandController) reconcileOnce(ctx context.Context) error {
 			owner := repository.GetOwner().GetLogin()
 			name := repository.GetName()
 
-			for _, status := range []string{"queued", "in_progress"} {
+			for _, status := range onDemandWorkflowRunStatuses {
 				runs, err := c.listWorkflowRunsFn(ctx, installationID, owner, name, status)
 				if err != nil {
 					return fmt.Errorf("listing workflow runs for %s/%s status %q: %w", owner, name, status, err)
 				}
 
 				for _, run := range runs {
+					if _, ok := scannedRuns[run.GetID()]; ok {
+						continue
+					}
+					scannedRuns[run.GetID()] = struct{}{}
+
 					jobs, err := c.listWorkflowJobsFn(ctx, installationID, owner, name, run.GetID())
 					if err != nil {
 						return fmt.Errorf("listing workflow jobs for %s/%s run %d: %w", owner, name, run.GetID(), err)
@@ -287,6 +300,7 @@ func (c *onDemandController) reconcileOnce(ctx context.Context) error {
 
 						c.logger.Info().
 							Int64("run_id", run.GetID()).
+							Str("run_status", run.GetStatus()).
 							Int64("job_id", job.GetID()).
 							Int64("runner_id", job.GetRunnerID()).
 							Str("runner_name", job.GetRunnerName()).
