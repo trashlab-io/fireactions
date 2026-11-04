@@ -2,9 +2,11 @@ package server
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestNewConfig(t *testing.T) {
@@ -146,4 +148,42 @@ func minimalValidConfig() *Config {
 	}}
 
 	return config
+}
+
+func TestConfigValidateOnDemandShard(t *testing.T) {
+	config := minimalValidConfig()
+	config.OnDemand = true
+	config.GitHub.WebhookSecret = "secret"
+	config.Pools[0].Runner.Labels = append(config.Pools[0].Runner.Labels, config.Pools[0].Name)
+	config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 2}
+
+	require.NoError(t, config.Validate())
+	assert.Equal(t, defaultOnDemandShardRotateAfter, config.OnDemandShard.RotateAfter)
+}
+
+func TestConfigValidateOnDemandShardRejectsIndexOutOfRange(t *testing.T) {
+	config := minimalValidConfig()
+	config.OnDemand = true
+	config.GitHub.WebhookSecret = "secret"
+	config.Pools[0].Runner.Labels = append(config.Pools[0].Runner.Labels, config.Pools[0].Name)
+	config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 3}
+
+	err := config.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "on_demand_shard.index")
+}
+
+func TestConfigValidateOnDemandShardRequiresOnDemand(t *testing.T) {
+	config := minimalValidConfig()
+	config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 0}
+
+	err := config.Validate()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "requires on_demand")
+}
+
+func TestOnDemandShardConfigDecodesRotateAfterDuration(t *testing.T) {
+	var shard OnDemandShardConfig
+	require.NoError(t, yaml.Unmarshal([]byte("count: 3\nindex: 1\nrotate_after: 10m\n"), &shard))
+	assert.Equal(t, OnDemandShardConfig{Count: 3, Index: 1, RotateAfter: 10 * time.Minute}, shard)
 }

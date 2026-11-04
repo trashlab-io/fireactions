@@ -23,6 +23,22 @@ bind_address: 0.0.0.0:8080
 on_demand: false
 
 #
+# Optional. Split queued job demand across hosts that serve the same pools.
+# Without this block, every host counts every queued job, so each host starts a VM
+# for the same job. With it, exactly one host counts each queued job at a time.
+# The owner host moves to the next index every rotate_after, so a job does not wait
+# on a host without free capacity. Jobs that already run on a local runner always count.
+# Give each host the same count and a unique index from 0 to count-1. All hosts in the
+# shard must serve the same pools.
+#
+# Default: not set (every host counts every queued job)
+#
+# on_demand_shard:
+#   count: 3
+#   index: 0
+#   rotate_after: 5m
+
+#
 # Global host capacity limits across all pools.
 #
 capacity:

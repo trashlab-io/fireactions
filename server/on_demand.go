@@ -36,6 +36,11 @@ type jobDemandEntry struct {
 	poolName     string
 	runner       demandRunnerMetadata
 	lastSeenAt   time.Time
+	// createdAt is the GitHub job creation time. It falls back to the first time
+	// this host saw the job. It sets the demand shard rotation.
+	createdAt time.Time
+	// local is true when the job runs on a runner of this host.
+	local bool
 }
 
 type poolDemandEntry struct {
@@ -208,6 +213,8 @@ func (c *onDemandController) processWorkflowJobEvent(event *githubv63.WorkflowJo
 		c.upsertJob(jobID, &jobDemandEntry{
 			organization: organization,
 			poolName:     poolName,
+			createdAt:    event.WorkflowJob.GetCreatedAt().Time,
+			local:        c.workflowJobRunnerOwnership(event.WorkflowJob) == "local",
 			runner: demandRunnerMetadataFromWorkflowJob(
 				poolName,
 				jobID,
@@ -322,6 +329,8 @@ func (c *onDemandController) reconcileOnce(ctx context.Context) error {
 						reconciledJobs[job.GetID()] = &jobDemandEntry{
 							organization: organization,
 							poolName:     poolName,
+							createdAt:    job.GetCreatedAt().Time,
+							local:        ownership == "local",
 							runner: demandRunnerMetadataFromWorkflowJob(
 								poolName,
 								job.GetID(),
@@ -353,6 +362,7 @@ func (c *onDemandController) upsertJob(jobID int64, entry *jobDemandEntry) {
 
 	delete(c.completedJobs, jobID)
 	entry.lastSeenAt = now
+	entry.createdAt = demandCreatedAt(entry.createdAt, c.jobs[jobID], now)
 	c.jobs[jobID] = entry
 	poolDemand := c.poolDemandLocked()
 	c.mu.Unlock()
@@ -442,6 +452,7 @@ func (c *onDemandController) mergeReconciledJobs(jobs map[int64]*jobDemandEntry,
 
 		entryCopy := *job
 		entryCopy.lastSeenAt = now
+		entryCopy.createdAt = demandCreatedAt(entryCopy.createdAt, c.jobs[jobID], now)
 		mergedJobs[jobID] = &entryCopy
 	}
 
@@ -492,9 +503,14 @@ func (c *onDemandController) poolDemandLocked() map[string]poolDemandEntry {
 		return jobIDs[i] < jobIDs[j]
 	})
 
+	shard := c.server.config.OnDemandShard
+	now := c.now()
 	for _, jobID := range jobIDs {
 		job := c.jobs[jobID]
 		if job == nil {
+			continue
+		}
+		if !job.local && !jobInDemandShard(shard, jobID, job.createdAt, now) {
 			continue
 		}
 		demand := poolDemand[job.poolName]
@@ -506,6 +522,38 @@ func (c *onDemandController) poolDemandLocked() map[string]poolDemandEntry {
 	}
 
 	return poolDemand
+}
+
+// demandCreatedAt returns the creation time to store for a job entry. It keeps the
+// GitHub creation time when known, else the time from the existing entry, else now.
+func demandCreatedAt(createdAt time.Time, existing *jobDemandEntry, now time.Time) time.Time {
+	if !createdAt.IsZero() {
+		return createdAt.UTC()
+	}
+	if existing != nil && !existing.createdAt.IsZero() {
+		return existing.createdAt
+	}
+
+	return now
+}
+
+// jobInDemandShard reports whether this host counts a queued job as demand.
+// Without a shard config every host counts every job. With a shard config exactly
+// one host counts the job at a time, and the owner moves to the next host each
+// RotateAfter interval, so a host without free capacity does not hold the job.
+func jobInDemandShard(shard *OnDemandShardConfig, jobID int64, createdAt, now time.Time) bool {
+	if shard == nil || shard.Count <= 1 {
+		return true
+	}
+
+	rotation := int64(0)
+	if shard.RotateAfter > 0 && !createdAt.IsZero() && now.After(createdAt) {
+		rotation = int64(now.Sub(createdAt) / shard.RotateAfter)
+	}
+	count := int64(shard.Count)
+	owner := ((jobID%count+count)%count + rotation%count) % count
+
+	return owner == int64(shard.Index)
 }
 
 func (c *onDemandController) now() time.Time {
