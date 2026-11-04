@@ -34,16 +34,16 @@ type CapacityConfig struct {
 }
 
 // OnDemandShardConfig splits queued job demand across hosts that serve the same pools.
-// Each host counts a queued job only when the job is in its shard. The shard of a job
-// moves to the next host after RotateAfter, so a host without capacity does not hold
-// a job for long.
+// A new queued job counts on one owner host. Each WidenAfter interval one more host
+// also counts it, until every host counts it. A host without capacity therefore delays
+// a job by at most WidenAfter, and a host never stops counting a queued job.
 type OnDemandShardConfig struct {
-	Count       int           `yaml:"count" validate:"min=1"`
-	Index       int           `yaml:"index" validate:"min=0"`
-	RotateAfter time.Duration `yaml:"rotate_after" validate:"min=0"`
+	Count      int           `yaml:"count" validate:"min=1"`
+	Index      int           `yaml:"index" validate:"min=0"`
+	WidenAfter time.Duration `yaml:"widen_after" validate:"min=0"`
 }
 
-const defaultOnDemandShardRotateAfter = 5 * time.Minute
+const defaultOnDemandShardWidenAfter = 2 * time.Minute
 
 type ContainerdConfig struct {
 	Address   string `yaml:"address" validate:"required"`
@@ -181,8 +181,8 @@ func (c *Config) Validate() error {
 			return fmt.Errorf("on_demand_shard.index %d must be less than on_demand_shard.count %d",
 				c.OnDemandShard.Index, c.OnDemandShard.Count)
 		}
-		if c.OnDemandShard.RotateAfter == 0 {
-			c.OnDemandShard.RotateAfter = defaultOnDemandShardRotateAfter
+		if c.OnDemandShard.WidenAfter == 0 {
+			c.OnDemandShard.WidenAfter = defaultOnDemandShardWidenAfter
 		}
 	}
 

@@ -500,41 +500,53 @@ func newSignedWebhookRequest(t *testing.T, secret string, payload []byte) *http.
 	return request
 }
 
-func TestJobInDemandShardAssignsEachJobToExactlyOneHost(t *testing.T) {
+func demandShardHosts(jobID int64, createdAt, now time.Time) []int {
+	hosts := []int{}
+	for index := 0; index < 3; index++ {
+		shard := &OnDemandShardConfig{Count: 3, Index: index, WidenAfter: 2 * time.Minute}
+		if jobInDemandShard(shard, jobID, createdAt, now) {
+			hosts = append(hosts, index)
+		}
+	}
+	return hosts
+}
+
+func TestJobInDemandShardStartsWithExactlyOneHost(t *testing.T) {
 	createdAt := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
-	for _, elapsed := range []time.Duration{0, 4 * time.Minute, 5 * time.Minute, 17 * time.Minute, time.Hour} {
-		now := createdAt.Add(elapsed)
-		for jobID := int64(1); jobID <= 50; jobID++ {
-			owners := 0
-			for index := 0; index < 3; index++ {
-				shard := &OnDemandShardConfig{Count: 3, Index: index, RotateAfter: 5 * time.Minute}
-				if jobInDemandShard(shard, jobID, createdAt, now) {
-					owners++
-				}
-			}
-			assert.Equal(t, 1, owners, "job %d after %s", jobID, elapsed)
+	for _, elapsed := range []time.Duration{-time.Minute, 0, time.Minute, 119 * time.Second} {
+		for jobID := int64(-5); jobID <= 50; jobID++ {
+			hosts := demandShardHosts(jobID, createdAt, createdAt.Add(elapsed))
+			assert.Len(t, hosts, 1, "job %d after %s", jobID, elapsed)
+			assert.Equal(t, int((jobID%3+3)%3), hosts[0], "job %d", jobID)
 		}
 	}
 }
 
-func TestJobInDemandShardRotatesOwner(t *testing.T) {
+func TestJobInDemandShardWidensOneHostPerInterval(t *testing.T) {
 	createdAt := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
-	owner := func(now time.Time) int {
+
+	assert.Equal(t, []int{1}, demandShardHosts(7, createdAt, createdAt.Add(time.Minute)))
+	assert.Equal(t, []int{1, 2}, demandShardHosts(7, createdAt, createdAt.Add(2*time.Minute)))
+	assert.Equal(t, []int{1, 2}, demandShardHosts(7, createdAt, createdAt.Add(3*time.Minute)))
+	assert.Equal(t, []int{0, 1, 2}, demandShardHosts(7, createdAt, createdAt.Add(4*time.Minute)))
+	assert.Equal(t, []int{0, 1, 2}, demandShardHosts(7, createdAt, createdAt.Add(time.Hour)))
+	assert.Equal(t, []int{2}, demandShardHosts(8, createdAt, createdAt.Add(time.Minute)))
+	assert.Equal(t, []int{0, 2}, demandShardHosts(8, createdAt, createdAt.Add(2*time.Minute)))
+}
+
+func TestJobInDemandShardNeverDropsAHost(t *testing.T) {
+	createdAt := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	for jobID := int64(1); jobID <= 30; jobID++ {
 		for index := 0; index < 3; index++ {
-			shard := &OnDemandShardConfig{Count: 3, Index: index, RotateAfter: 5 * time.Minute}
-			if jobInDemandShard(shard, 7, createdAt, now) {
-				return index
+			shard := &OnDemandShardConfig{Count: 3, Index: index, WidenAfter: 2 * time.Minute}
+			counted := false
+			for elapsed := time.Duration(0); elapsed <= 10*time.Minute; elapsed += 10 * time.Second {
+				in := jobInDemandShard(shard, jobID, createdAt, createdAt.Add(elapsed))
+				assert.False(t, counted && !in, "host %d dropped job %d after %s", index, jobID, elapsed)
+				counted = counted || in
 			}
 		}
-		return -1
 	}
-
-	first := owner(createdAt.Add(time.Minute))
-	assert.Equal(t, 1, first)
-	assert.Equal(t, first, owner(createdAt.Add(4*time.Minute)))
-	assert.Equal(t, 2, owner(createdAt.Add(5*time.Minute)))
-	assert.Equal(t, 0, owner(createdAt.Add(10*time.Minute)))
-	assert.Equal(t, first, owner(createdAt.Add(15*time.Minute)))
 }
 
 func TestJobInDemandShardDisabledCountsEveryJob(t *testing.T) {
@@ -545,7 +557,7 @@ func TestJobInDemandShardDisabledCountsEveryJob(t *testing.T) {
 
 func TestOnDemandReconcileCountsOnlyQueuedJobsInLocalShard(t *testing.T) {
 	server, poolA, _ := newOnDemandTestServer(t)
-	server.config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 0, RotateAfter: 5 * time.Minute}
+	server.config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 0, WidenAfter: 2 * time.Minute}
 	controller := newOnDemandController(server)
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	controller.nowFn = func() time.Time { return now }
@@ -583,22 +595,33 @@ func TestOnDemandReconcileCountsOnlyQueuedJobsInLocalShard(t *testing.T) {
 	}
 
 	require.NoError(t, controller.reconcileOnce(context.Background()))
-	// Jobs 300 and 303 are in shard 0 for the first rotation interval.
+	// Jobs 300 and 303 are owned by host 0.
 	assert.Equal(t, 2, poolA.GetDesiredReplicas())
 
-	now = now.Add(5 * time.Minute)
-	require.NoError(t, controller.reconcileOnce(context.Background()))
-	// After one rotation, jobs 302 and 305 move to shard 0.
-	assert.Equal(t, 2, poolA.GetDesiredReplicas())
-	shard := server.config.OnDemandShard
-	assert.True(t, jobInDemandShard(shard, 302, createdAt.Time, now))
-	assert.True(t, jobInDemandShard(shard, 305, createdAt.Time, now))
-	assert.False(t, jobInDemandShard(shard, 300, createdAt.Time, now))
+	// Without a scan, the local refresh widens jobs 302 and 305 to host 0.
+	now = now.Add(2 * time.Minute)
+	controller.refreshDemand()
+	assert.Equal(t, 4, poolA.GetDesiredReplicas())
+
+	// After two intervals every host counts every job.
+	now = now.Add(2 * time.Minute)
+	controller.refreshDemand()
+	assert.Equal(t, 6, poolA.GetDesiredReplicas())
+}
+
+func TestOnDemandShardKeepsFirstSeenTimeWhenCreatedAtIsMissing(t *testing.T) {
+	firstSeen := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	existing := &jobDemandEntry{createdAt: firstSeen}
+	githubTime := time.Date(2026, 11, 4, 11, 0, 0, 0, time.UTC)
+
+	assert.Equal(t, firstSeen, demandCreatedAt(time.Time{}, nil, firstSeen))
+	assert.Equal(t, firstSeen, demandCreatedAt(time.Time{}, existing, firstSeen.Add(time.Minute)))
+	assert.Equal(t, githubTime, demandCreatedAt(githubTime, existing, firstSeen.Add(time.Minute)))
 }
 
 func TestOnDemandShardAlwaysCountsJobOnLocalRunner(t *testing.T) {
 	server, poolA, _ := newOnDemandTestServer(t)
-	server.config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 0, RotateAfter: 5 * time.Minute}
+	server.config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 0, WidenAfter: 2 * time.Minute}
 	controller := newOnDemandController(server)
 	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
 	controller.nowFn = func() time.Time { return now }

@@ -158,7 +158,7 @@ func TestConfigValidateOnDemandShard(t *testing.T) {
 	config.OnDemandShard = &OnDemandShardConfig{Count: 3, Index: 2}
 
 	require.NoError(t, config.Validate())
-	assert.Equal(t, defaultOnDemandShardRotateAfter, config.OnDemandShard.RotateAfter)
+	assert.Equal(t, defaultOnDemandShardWidenAfter, config.OnDemandShard.WidenAfter)
 }
 
 func TestConfigValidateOnDemandShardRejectsIndexOutOfRange(t *testing.T) {
@@ -182,8 +182,18 @@ func TestConfigValidateOnDemandShardRequiresOnDemand(t *testing.T) {
 	assert.Contains(t, err.Error(), "requires on_demand")
 }
 
-func TestOnDemandShardConfigDecodesRotateAfterDuration(t *testing.T) {
+func TestConfigValidateOnDemandShardRejectsZeroCount(t *testing.T) {
+	config := minimalValidConfig()
+	config.OnDemand = true
+	config.GitHub.WebhookSecret = "secret"
+	config.Pools[0].Runner.Labels = append(config.Pools[0].Runner.Labels, config.Pools[0].Name)
+	config.OnDemandShard = &OnDemandShardConfig{Count: 0, Index: 0}
+
+	require.Error(t, config.Validate())
+}
+
+func TestOnDemandShardConfigDecodesWidenAfterDuration(t *testing.T) {
 	var shard OnDemandShardConfig
-	require.NoError(t, yaml.Unmarshal([]byte("count: 3\nindex: 1\nrotate_after: 10m\n"), &shard))
-	assert.Equal(t, OnDemandShardConfig{Count: 3, Index: 1, RotateAfter: 10 * time.Minute}, shard)
+	require.NoError(t, yaml.Unmarshal([]byte("count: 3\nindex: 1\nwiden_after: 90s\n"), &shard))
+	assert.Equal(t, OnDemandShardConfig{Count: 3, Index: 1, WidenAfter: 90 * time.Second}, shard)
 }

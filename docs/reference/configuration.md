@@ -25,18 +25,22 @@ on_demand: false
 #
 # Optional. Split queued job demand across hosts that serve the same pools.
 # Without this block, every host counts every queued job, so each host starts a VM
-# for the same job. With it, exactly one host counts each queued job at a time.
-# The owner host moves to the next index every rotate_after, so a job does not wait
-# on a host without free capacity. Jobs that already run on a local runner always count.
-# Give each host the same count and a unique index from 0 to count-1. All hosts in the
-# shard must serve the same pools.
+# for the same job. With it, one owner host counts a new queued job. After each
+# widen_after interval of job age, one more host also counts the job, until every host
+# counts it. So a job waits at most widen_after on an owner host that has no free
+# capacity or is down. Jobs that already run on a local runner always count.
+# Hosts recompute demand every 20 seconds, so widening happens on time between scans.
+# The metric fireactions_on_demand_jobs_skipped_by_shard shows the queued jobs per pool
+# that this host does not count yet.
+# Give each host the same count and widen_after, and a unique index from 0 to count-1.
+# All hosts in the shard must serve the same pools.
 #
-# Default: not set (every host counts every queued job)
+# Default: not set (every host counts every queued job). widen_after default: 2m
 #
 # on_demand_shard:
 #   count: 3
 #   index: 0
-#   rotate_after: 5m
+#   widen_after: 2m
 
 #
 # Global host capacity limits across all pools.

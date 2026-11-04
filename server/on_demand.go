@@ -45,8 +45,13 @@ type jobDemandEntry struct {
 
 type poolDemandEntry struct {
 	count   int
+	skipped int
 	runners []demandRunnerMetadata
 }
+
+// onDemandShardRefreshInterval is how often a host with a shard config recomputes
+// demand from its cached jobs, so a job widens to the next host on time between scans.
+const onDemandShardRefreshInterval = 20 * time.Second
 
 type onDemandController struct {
 	server        *Server
@@ -89,6 +94,7 @@ func (c *onDemandController) Initialize(ctx context.Context) error {
 	pools := c.server.snapshotPools()
 	for _, pool := range pools {
 		metricOnDemandJobsActive.WithLabelValues(pool.config.Name, pool.config.Runner.Organization).Set(0)
+		metricOnDemandJobsSkippedByShard.WithLabelValues(pool.config.Name, pool.config.Runner.Organization).Set(0)
 
 		if _, ok := c.installationIDs[pool.config.Runner.Organization]; ok {
 			continue
@@ -119,6 +125,31 @@ func (c *onDemandController) Run(ctx context.Context) {
 			}
 		}
 	}()
+
+	if c.server.config.OnDemandShard == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(onDemandShardRefreshInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.refreshDemand()
+			}
+		}
+	}()
+}
+
+// refreshDemand recomputes pool demand from cached jobs without GitHub calls.
+func (c *onDemandController) refreshDemand() {
+	c.mu.Lock()
+	poolDemand := c.poolDemandLocked()
+	c.mu.Unlock()
+
+	c.applyPoolDemand(poolDemand)
 }
 
 func (c *onDemandController) HandleGitHubWebhook(w http.ResponseWriter, r *http.Request) {
@@ -510,10 +541,12 @@ func (c *onDemandController) poolDemandLocked() map[string]poolDemandEntry {
 		if job == nil {
 			continue
 		}
+		demand := poolDemand[job.poolName]
 		if !job.local && !jobInDemandShard(shard, jobID, job.createdAt, now) {
+			demand.skipped++
+			poolDemand[job.poolName] = demand
 			continue
 		}
-		demand := poolDemand[job.poolName]
 		demand.count++
 		if job.runner.Prefix != "" {
 			demand.runners = append(demand.runners, job.runner)
@@ -538,22 +571,27 @@ func demandCreatedAt(createdAt time.Time, existing *jobDemandEntry, now time.Tim
 }
 
 // jobInDemandShard reports whether this host counts a queued job as demand.
-// Without a shard config every host counts every job. With a shard config exactly
-// one host counts the job at a time, and the owner moves to the next host each
-// RotateAfter interval, so a host without free capacity does not hold the job.
+// Without a shard config every host counts every job. With a shard config one owner
+// host counts a new job. After each WidenAfter interval of job age, the next host also
+// counts it, until every host counts it. A host never stops counting a job it counted
+// before, so timing differences between hosts can add a VM early but never remove one.
 func jobInDemandShard(shard *OnDemandShardConfig, jobID int64, createdAt, now time.Time) bool {
 	if shard == nil || shard.Count <= 1 {
 		return true
 	}
 
-	rotation := int64(0)
-	if shard.RotateAfter > 0 && !createdAt.IsZero() && now.After(createdAt) {
-		rotation = int64(now.Sub(createdAt) / shard.RotateAfter)
-	}
 	count := int64(shard.Count)
-	owner := ((jobID%count+count)%count + rotation%count) % count
+	widened := int64(0)
+	if shard.WidenAfter > 0 && !createdAt.IsZero() && now.After(createdAt) {
+		widened = int64(now.Sub(createdAt) / shard.WidenAfter)
+	}
+	if widened >= count-1 {
+		return true
+	}
+	owner := (jobID%count + count) % count
+	distance := (int64(shard.Index) - owner + count) % count
 
-	return owner == int64(shard.Index)
+	return distance <= widened
 }
 
 func (c *onDemandController) now() time.Time {
@@ -569,6 +607,7 @@ func (c *onDemandController) applyPoolDemand(poolDemand map[string]poolDemandEnt
 		demand := poolDemand[pool.config.Name]
 		pool.SetDemandReplicasWithRunnerMetadata(demand.count, demand.runners)
 		metricOnDemandJobsActive.WithLabelValues(pool.config.Name, pool.config.Runner.Organization).Set(float64(demand.count))
+		metricOnDemandJobsSkippedByShard.WithLabelValues(pool.config.Name, pool.config.Runner.Organization).Set(float64(demand.skipped))
 	}
 }
 

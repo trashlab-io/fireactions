@@ -98,7 +98,13 @@ var (
 	metricOnDemandJobsActive = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name:      "on_demand_jobs_active",
 		Namespace: namespace,
-		Help:      "Number of active queued or running workflow jobs targeting a pool.",
+		Help:      "Number of active queued or running workflow jobs targeting a pool that this host counts as demand.",
+	}, []string{"pool", "organization"})
+
+	metricOnDemandJobsSkippedByShard = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name:      "on_demand_jobs_skipped_by_shard",
+		Namespace: namespace,
+		Help:      "Number of queued workflow jobs targeting a pool that this host does not count because of on_demand_shard.",
 	}, []string{"pool", "organization"})
 
 	metricOnDemandWebhookEvents = promauto.NewCounterVec(prometheus.CounterOpts{
