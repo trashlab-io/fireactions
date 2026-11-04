@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"time"
 
 	"github.com/go-playground/validator/v10"
 	"gopkg.in/yaml.v3"
@@ -12,16 +13,17 @@ import (
 
 // Config is the configuration for the Client.
 type Config struct {
-	BindAddress      string            `yaml:"bind_address" validate:"required,hostname_port"`
-	OnDemand         bool              `yaml:"on_demand" validate:""`
-	Capacity         *CapacityConfig   `yaml:"capacity"`
-	Containerd       *ContainerdConfig `yaml:"containerd" validate:"required"`
-	Metrics          *MetricsConfig    `yaml:"metrics"`
-	BasicAuthEnabled bool              `yaml:"basic_auth_enabled" validate:""`
-	BasicAuthUsers   map[string]string `yaml:"basic_auth_users" validate:"required_if=basic_auth_enabled true"`
-	GitHub           *GitHubConfig     `yaml:"github" validate:"required"`
-	Pools            []*PoolConfig     `yaml:"pools" validate:"required,min=1"`
-	LogLevel         string            `yaml:"log_level" validate:"required,oneof=debug info warn error fatal panic trace"`
+	BindAddress      string               `yaml:"bind_address" validate:"required,hostname_port"`
+	OnDemand         bool                 `yaml:"on_demand" validate:""`
+	OnDemandShard    *OnDemandShardConfig `yaml:"on_demand_shard"`
+	Capacity         *CapacityConfig      `yaml:"capacity"`
+	Containerd       *ContainerdConfig    `yaml:"containerd" validate:"required"`
+	Metrics          *MetricsConfig       `yaml:"metrics"`
+	BasicAuthEnabled bool                 `yaml:"basic_auth_enabled" validate:""`
+	BasicAuthUsers   map[string]string    `yaml:"basic_auth_users" validate:"required_if=basic_auth_enabled true"`
+	GitHub           *GitHubConfig        `yaml:"github" validate:"required"`
+	Pools            []*PoolConfig        `yaml:"pools" validate:"required,min=1"`
+	LogLevel         string               `yaml:"log_level" validate:"required,oneof=debug info warn error fatal panic trace"`
 
 	path string
 }
@@ -30,6 +32,18 @@ type CapacityConfig struct {
 	MemoryLimitMib int64 `yaml:"memory_limit_mib" validate:"min=0"`
 	VCPULimit      int64 `yaml:"vcpu_limit" validate:"min=0"`
 }
+
+// OnDemandShardConfig splits queued job demand across hosts that serve the same pools.
+// A new queued job counts on one owner host. Each WidenAfter interval one more host
+// also counts it, until every host counts it. A host without capacity therefore delays
+// a job by at most WidenAfter, and a host never stops counting a queued job.
+type OnDemandShardConfig struct {
+	Count      int           `yaml:"count" validate:"min=1"`
+	Index      int           `yaml:"index" validate:"min=0"`
+	WidenAfter time.Duration `yaml:"widen_after" validate:"min=0"`
+}
+
+const defaultOnDemandShardWidenAfter = 2 * time.Minute
 
 type ContainerdConfig struct {
 	Address   string `yaml:"address" validate:"required"`
@@ -156,6 +170,19 @@ func (c *Config) Validate() error {
 		}
 		if c.Metrics.Address == "" {
 			return fmt.Errorf("metrics address is required when on_demand is enabled")
+		}
+	}
+
+	if c.OnDemandShard != nil {
+		if !c.OnDemand {
+			return fmt.Errorf("on_demand_shard requires on_demand to be enabled")
+		}
+		if c.OnDemandShard.Index >= c.OnDemandShard.Count {
+			return fmt.Errorf("on_demand_shard.index %d must be less than on_demand_shard.count %d",
+				c.OnDemandShard.Index, c.OnDemandShard.Count)
+		}
+		if c.OnDemandShard.WidenAfter == 0 {
+			c.OnDemandShard.WidenAfter = defaultOnDemandShardWidenAfter
 		}
 	}
 
