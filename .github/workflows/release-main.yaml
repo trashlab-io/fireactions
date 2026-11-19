@@ -1,0 +1,72 @@
+---
+name: release-main
+
+# Every push to main publishes a release that the hosts install with trashlab's
+# scripts/ci-runner-fireactions/update-fireactions-binary.sh (FIREACTIONS_VERSION=1.1.<run number>).
+# The version is v1.1.<run number>; the commit is in `fireactions --version` and the release notes.
+
+on:
+  push:
+    branches:
+    - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: 1.25.6
+
+    - name: Run tests
+      run: go test ./...
+
+    - name: Tag the commit
+      id: tag
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        tag="v1.1.${GITHUB_RUN_NUMBER}"
+        if gh release view "${tag}" >/dev/null 2>&1; then
+          echo "Error: release ${tag} already exists." >&2
+          exit 1
+        fi
+        git tag "${tag}"
+        echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+
+    # GoReleaser creates the GitHub release and its tag on this commit. The tag is not pushed
+    # from here, and tags created with GITHUB_TOKEN do not trigger release.yaml.
+    - name: Run GoReleaser
+      uses: goreleaser/goreleaser-action@v5
+      with:
+        version: '~> v1'
+        args: release --clean --skip=docker
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Summary
+      run: |
+        version="${{ steps.tag.outputs.tag }}"
+        {
+          echo "Released ${version} from ${GITHUB_SHA}."
+          echo
+          echo "Install on a host:"
+          echo
+          echo '```bash'
+          echo "FIREACTIONS_VERSION=${version#v} ./update-fireactions-binary.sh"
+          echo '```'
+        } >> "${GITHUB_STEP_SUMMARY}"
