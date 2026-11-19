@@ -5,6 +5,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func TestNewConfig(t *testing.T) {
@@ -146,4 +147,30 @@ func minimalValidConfig() *Config {
 	}}
 
 	return config
+}
+
+func TestConfigParsesIdleReplicasAndPriority(t *testing.T) {
+	var pool PoolConfig
+	require.NoError(t, yaml.Unmarshal([]byte("name: fire-cd-12x12\nidle_replicas: 1\npriority: true\n"), &pool))
+	assert.Equal(t, 1, pool.IdleReplicas)
+	assert.True(t, pool.Priority)
+	assert.Equal(t, 0, pool.Replicas)
+
+	require.NoError(t, yaml.Unmarshal([]byte("name: fire-2x4\n"), &pool))
+	assert.Equal(t, 0, pool.IdleReplicas)
+	assert.False(t, pool.Priority)
+}
+
+func TestConfigValidateRejectsInvalidIdleReplicas(t *testing.T) {
+	config := minimalValidConfig()
+	config.Pools[0].IdleReplicas = -1
+	require.Error(t, config.Validate())
+
+	config = minimalValidConfig()
+	config.Capacity = &CapacityConfig{MemoryLimitMib: config.Pools[0].Firecracker.MachineConfig.MemSizeMib}
+	config.Pools[0].IdleReplicas = 2
+	require.ErrorContains(t, config.Validate(), "idle_replicas")
+
+	config.Pools[0].IdleReplicas = 1
+	require.NoError(t, config.Validate())
 }

@@ -243,3 +243,77 @@ func TestCapacityManagerIgnoresWaitersThatCanNeverFit(t *testing.T) {
 	require.Len(t, got, 4)
 	require.Equal(t, CapacityBlockReasonNone, reason)
 }
+
+func TestCapacityManagerPriorityPoolGoesAheadOfOlderWaiters(t *testing.T) {
+	manager, clock := newFairCapacityManager(4096, 0)
+	manager.SetPoolPriority("deploy", true)
+
+	held, _ := manager.ReserveFor("ci", 4, 1024, 1)
+	require.Len(t, held, 4)
+
+	// A large CI pool has waited for a while before the deploy pool asks.
+	_, _ = manager.ReserveFor("ci-large", 1, 2048, 1)
+	clock.Advance(time.Minute)
+	got, _ := manager.ReserveFor("deploy", 1, 2048, 1)
+	require.Empty(t, got)
+
+	// 2 GiB free: they go to the deploy pool, not the older CI waiter.
+	held[0].Release()
+	held[1].Release()
+	clock.Advance(time.Second)
+	got, reason := manager.ReserveFor("ci-large", 1, 2048, 1)
+	require.Empty(t, got)
+	require.Equal(t, CapacityBlockReasonWaiting, reason)
+	got, reason = manager.ReserveFor("deploy", 1, 2048, 1)
+	require.Equal(t, CapacityBlockReasonNone, reason)
+	require.Len(t, got, 1)
+
+	// With the deploy pool served, the CI waiter is first again.
+	held[2].Release()
+	held[3].Release()
+	clock.Advance(time.Second)
+	got, _ = manager.ReserveFor("ci", 1, 1024, 1)
+	require.Empty(t, got)
+	got, _ = manager.ReserveFor("ci-large", 1, 2048, 1)
+	require.Len(t, got, 1)
+}
+
+func TestCapacityManagerPriorityPoolIsNotHeldForNonPriorityWaiters(t *testing.T) {
+	manager, _ := newFairCapacityManager(4096, 0)
+	manager.SetPoolPriority("deploy", true)
+
+	held, _ := manager.ReserveFor("ci", 3, 1024, 1)
+	require.Len(t, held, 3)
+	_, reason := manager.ReserveFor("ci-large", 1, 2048, 1)
+	require.Equal(t, CapacityBlockReasonMemory, reason)
+
+	// 1 GiB is free and held for ci-large, but a priority pool asking for the
+	// first time still gets it.
+	got, reason := manager.ReserveFor("deploy", 1, 1024, 1)
+	require.Equal(t, CapacityBlockReasonNone, reason)
+	require.Len(t, got, 1)
+}
+
+func TestCapacityManagerPriorityPoolsWaitInOrderAmongThemselves(t *testing.T) {
+	manager, clock := newFairCapacityManager(2048, 0)
+	manager.SetPoolPriority("deploy-a", true)
+	manager.SetPoolPriority("deploy-b", true)
+
+	held, _ := manager.ReserveFor("ci", 2, 1024, 1)
+	_, _ = manager.ReserveFor("deploy-a", 1, 1024, 1)
+	clock.Advance(time.Second)
+	_, _ = manager.ReserveFor("deploy-b", 1, 1024, 1)
+
+	held[0].Release()
+	clock.Advance(time.Second)
+	got, reason := manager.ReserveFor("deploy-b", 1, 1024, 1)
+	require.Empty(t, got)
+	require.Equal(t, CapacityBlockReasonWaiting, reason)
+	got, _ = manager.ReserveFor("deploy-a", 1, 1024, 1)
+	require.Len(t, got, 1)
+
+	// Clearing the flag makes the pool an ordinary waiter again.
+	manager.SetPoolPriority("deploy-b", false)
+	manager.SetPoolPriority("deploy-a", false)
+	assert.Empty(t, manager.priorityPools)
+}

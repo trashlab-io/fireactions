@@ -34,6 +34,12 @@ var (
 		Help:      "Desired number of runners in a pool (replicas)",
 	}, []string{"pool", "organization"})
 
+	metricPoolRunnersBusy = promauto.NewGaugeVec(prometheus.GaugeOpts{
+		Name:      "pool_runners_busy",
+		Namespace: namespace,
+		Help:      "Number of runners running a job in a pool that keeps idle replicas",
+	}, []string{"pool", "organization"})
+
 	metricPoolRunnersPending = promauto.NewGaugeVec(prometheus.GaugeOpts{
 		Name:      "pool_runners_pending",
 		Namespace: namespace,
