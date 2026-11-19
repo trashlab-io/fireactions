@@ -516,6 +516,39 @@ func TestPoolScaleDownKeepsBusyMachineWhenDemandDrops(t *testing.T) {
 	assert.False(t, machine.stopping)
 }
 
+func TestPoolDiscardUnstartedRunnerRemovesRunnerAndReturnsCause(t *testing.T) {
+	capacity := NewCapacityManager(nil)
+	pool := newTestPool(t, "pool-a", 2048, 2, capacity)
+
+	var removedName string
+	var removedID int64
+	pool.removeRunnerFn = func(_ context.Context, name string, id int64) error {
+		removedName, removedID = name, id
+		return nil
+	}
+
+	cause := errors.New("firecracker: starting machine: no space left on device")
+	err := pool.discardUnstartedRunner("pool-a-abc", 123, cause)
+
+	require.ErrorIs(t, err, cause)
+	assert.Equal(t, "pool-a-abc", removedName)
+	assert.Equal(t, int64(123), removedID)
+}
+
+func TestPoolDiscardUnstartedRunnerKeepsCauseWhenRemovalFails(t *testing.T) {
+	capacity := NewCapacityManager(nil)
+	pool := newTestPool(t, "pool-a", 2048, 2, capacity)
+
+	pool.removeRunnerFn = func(context.Context, string, int64) error {
+		return &githubv63.ErrorResponse{Response: &http.Response{StatusCode: 403}}
+	}
+
+	cause := errors.New("firecracker: starting machine: CNI failure")
+	err := pool.discardUnstartedRunner("pool-a-abc", 123, cause)
+
+	require.ErrorIs(t, err, cause)
+}
+
 func TestPoolDeleteMachineSkipsRunnerThatTurnsBusyDuringDelete(t *testing.T) {
 	pool := newTestPool(t, "pool-race-delete", 2048, 2, NewCapacityManager(nil))
 

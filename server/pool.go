@@ -727,7 +727,8 @@ func (p *Pool) createMachine(ctx context.Context, reservation *CapacityReservati
 	vmmCtx, vmmCancel := context.WithCancel(p.ctx)
 	if err := fcMachine.Start(vmmCtx); err != nil {
 		vmmCancel()
-		return fmt.Errorf("firecracker: starting machine: %w", err)
+		return p.discardUnstartedRunner(jitConfig.GetRunner().GetName(), jitConfig.GetRunner().GetID(),
+			fmt.Errorf("firecracker: starting machine: %w", err))
 	}
 
 	processID, err := fcMachine.PID()
@@ -1238,6 +1239,22 @@ func growDevmapperThinTable(table string, targetSizeBytes uint64) (string, error
 
 	fields[1] = strconv.FormatUint(targetSectors, 10)
 	return strings.Join(fields, " "), nil
+}
+
+// discardUnstartedRunner removes the GitHub runner registered by generate-jitconfig when its VM fails
+// to start, and returns cause. No VM will ever connect as that runner, so GitHub keeps it as an
+// offline runner for about a day. A host that keeps failing to start VMs (for example with a full
+// disk) then fills the runner group's 10,000 runner limit, and every host's generate-jitconfig call
+// fails with 422 until those runners are deleted.
+func (p *Pool) discardUnstartedRunner(runnerName string, runnerID int64, cause error) error {
+	ctx, cancel := context.WithTimeout(context.Background(), scaleDownRunnerAPITimeout)
+	defer cancel()
+
+	if err := p.removeGitHubRunner(ctx, runnerName, runnerID); err != nil {
+		p.logger.Error().Err(err).Msgf("Failed to delete GitHub runner %s (ID: %d) of a VM that did not start", runnerName, runnerID)
+	}
+
+	return cause
 }
 
 // removeGitHubRunner removes a runner from GitHub Actions.
