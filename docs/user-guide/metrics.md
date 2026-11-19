@@ -16,6 +16,7 @@ The following metrics are available, excluding the default Prometheus metrics:
 | `fireactions_pools_total`                    | Gauge     | Total number of pools                                     | None                                             |
 | `fireactions_pool_runners_current`           | Gauge     | Current number of running runners in a pool               | `pool`, `organization`                           |
 | `fireactions_pool_runners_desired`           | Gauge     | Desired number of runners in a pool (replicas)            | `pool`, `organization`                           |
+| `fireactions_pool_runners_busy`              | Gauge     | Runners running a job in a pool with `idle_replicas`      | `pool`, `organization`                           |
 | `fireactions_pool_status`                    | Gauge     | Status of a pool (0 = paused, 1 = active)                 | `pool`                                           |
 | `fireactions_pool_scale_requests_total`      | Counter   | Number of scale API requests for a pool                   | `pool`                                           |
 | `fireactions_scale_operations_total`         | Counter   | Total number of individual scale operations               | `pool`, `organization`, `direction`, `status`    |

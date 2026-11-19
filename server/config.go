@@ -199,6 +199,15 @@ func (c *Config) Validate() error {
 				pool.Name, pool.Firecracker.MachineConfig.VcpuCount, c.Capacity.VCPULimit)
 		}
 
+		if pool.IdleReplicas < 0 {
+			return fmt.Errorf("pool %q idle_replicas must not be negative", pool.Name)
+		}
+
+		if c.Capacity.MemoryLimitMib > 0 && int64(pool.IdleReplicas)*pool.Firecracker.MachineConfig.MemSizeMib > c.Capacity.MemoryLimitMib {
+			return fmt.Errorf("pool %q idle_replicas %d need more memory than capacity.memory_limit_mib %d",
+				pool.Name, pool.IdleReplicas, c.Capacity.MemoryLimitMib)
+		}
+
 		if c.OnDemand && !slices.Contains(pool.Runner.Labels, pool.Name) {
 			return fmt.Errorf("pool %q runner.labels must include the pool name when on_demand is enabled", pool.Name)
 		}

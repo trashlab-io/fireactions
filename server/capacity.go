@@ -72,14 +72,16 @@ type CapacityManager struct {
 	vcpuReserved      int64
 	reservations      map[uint64]*capacityReservationState
 	waiters           map[string]*capacityWaiter
+	priorityPools     map[string]bool
 	now               func() time.Time
 }
 
 func NewCapacityManager(cfg *CapacityConfig) *CapacityManager {
 	manager := &CapacityManager{
-		reservations: make(map[uint64]*capacityReservationState),
-		waiters:      make(map[string]*capacityWaiter),
-		now:          time.Now,
+		reservations:  make(map[uint64]*capacityReservationState),
+		waiters:       make(map[string]*capacityWaiter),
+		priorityPools: make(map[string]bool),
+		now:           time.Now,
 	}
 	if cfg != nil {
 		manager.memoryLimitMib = cfg.MemoryLimitMib
@@ -203,6 +205,26 @@ func (m *CapacityManager) ReserveFor(pool string, count int, memoryMib, vcpuCoun
 	}
 }
 
+// SetPoolPriority marks a pool as a priority pool. A waiting priority pool goes
+// ahead of every waiting non-priority pool, whatever their waiting age, and a
+// priority pool is never held back for a non-priority pool. Priority pools wait
+// in order of waiting age among themselves. Use it for a few small pools whose
+// jobs must start quickly, such as deploys; it does not reserve capacity.
+func (m *CapacityManager) SetPoolPriority(pool string, priority bool) {
+	if m == nil || pool == "" {
+		return
+	}
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if priority {
+		m.priorityPools[pool] = true
+		return
+	}
+	delete(m.priorityPools, pool)
+}
+
 // Forget removes a pool from the waiting order, for example when its demand is
 // met or gone.
 func (m *CapacityManager) Forget(pool string) {
@@ -243,11 +265,13 @@ func (m *CapacityManager) pruneWaitersLocked(now time.Time) {
 	}
 }
 
-// headWaiterLocked returns the pool other than pool that has waited longest
-// and has waited longer than pool itself. VMs that could never fit within the
-// limits do not hold capacity back.
+// headWaiterLocked returns the pool other than pool that is first in the
+// waiting order and goes before pool itself. Priority pools go before other
+// pools; within the same priority, the pool that has waited longest goes
+// first. VMs that could never fit within the limits do not hold capacity back.
 func (m *CapacityManager) headWaiterLocked(pool string) *capacityWaiter {
 	var head *capacityWaiter
+	headPriority := false
 	for name, waiter := range m.waiters {
 		if name == pool {
 			continue
@@ -258,19 +282,38 @@ func (m *CapacityManager) headWaiterLocked(pool string) *capacityWaiter {
 		if m.vcpuLimit > 0 && waiter.vcpuCount > m.vcpuLimit {
 			continue
 		}
-		if head == nil || waiter.since.Before(head.since) {
+		priority := m.priorityPools[name]
+		if head == nil || waiterGoesFirst(priority, waiter.since, headPriority, head.since) {
 			head = waiter
+			headPriority = priority
 		}
 	}
 
 	if head == nil {
 		return nil
 	}
-	if own, ok := m.waiters[pool]; ok && !head.since.Before(own.since) {
+
+	ownPriority := m.priorityPools[pool]
+	if own, ok := m.waiters[pool]; ok {
+		if !waiterGoesFirst(headPriority, head.since, ownPriority, own.since) {
+			return nil
+		}
+		return head
+	}
+	// A pool that is not waiting yet starts at the back of its priority class.
+	if ownPriority && !headPriority {
 		return nil
 	}
 
 	return head
+}
+
+// waiterGoesFirst reports whether waiter a goes before waiter b.
+func waiterGoesFirst(aPriority bool, aSince time.Time, bPriority bool, bSince time.Time) bool {
+	if aPriority != bPriority {
+		return aPriority
+	}
+	return aSince.Before(bSince)
 }
 
 func (m *CapacityManager) Snapshot() CapacitySnapshot {

@@ -41,6 +41,7 @@ const (
 	defaultSnapshotter        = "devmapper"
 	scaleDownStateTimeout     = 2 * time.Second
 	scaleDownRunnerAPITimeout = 10 * time.Second
+	busyStateTimeout          = time.Second
 	configureCPUHandlerName   = "fcinit.ConfigureCPU"
 )
 
@@ -62,6 +63,7 @@ type Pool struct {
 	logger                *zerolog.Logger
 	baseReplicas          atomic.Int32
 	demandReplicas        atomic.Int32
+	busyReplicas          atomic.Int32
 	desiredReplicas       atomic.Int32
 	isActive              bool
 	onDemandRunnersMu     sync.Mutex
@@ -85,9 +87,19 @@ type PoolConfig struct {
 	Name           string             `yaml:"name" validate:"required"`
 	ShutdownOnExit *bool              `yaml:"shutdown_on_exit"`
 	Replicas       int                `yaml:"replicas" validate:"min=0"`
+	IdleReplicas   int                `yaml:"idle_replicas" validate:"min=0"`
+	Priority       bool               `yaml:"priority"`
 	Runner         *RunnerConfig      `yaml:"runner" validate:"required"`
 	Firecracker    *FirecrackerConfig `yaml:"firecracker" validate:"required"`
 }
+
+// IdleReplicas keeps that many idle runners ready on top of the runners that
+// are running a job, so a new job starts without waiting for the on-demand
+// scan or a VM boot. A runner that takes a job is replaced right away.
+//
+// Priority puts the pool ahead of other pools when capacity is short (see
+// CapacityManager.SetPoolPriority). Together they give a small pool, such as
+// deploys, runners that start in seconds while the hosts are full.
 
 // UnmarshalYAML implements custom unmarshaling to set defaults.
 func (p *PoolConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
@@ -136,7 +148,8 @@ func NewPool(logger *zerolog.Logger, config *PoolConfig, github *github.Client, 
 	}
 
 	p.baseReplicas.Store(int32(config.Replicas))
-	p.desiredReplicas.Store(int32(config.Replicas))
+	p.desiredReplicas.Store(int32(max(config.Replicas, config.IdleReplicas)))
+	capacity.SetPoolPriority(config.Name, config.Priority)
 
 	if _, err := os.Stat(p.GetDir()); os.IsNotExist(err) {
 		if err := os.MkdirAll(p.GetDir(), 0755); err != nil {
@@ -182,6 +195,10 @@ func (p *Pool) Run() {
 		case <-p.stopCh:
 			return
 		default:
+		}
+
+		if p.config.IdleReplicas > 0 {
+			p.updateBusyReplicas(p.ctx)
 		}
 
 		curSize := p.GetCurrentSize()
@@ -514,8 +531,60 @@ func (p *Pool) recomputeDesiredReplicas() {
 	baseReplicas := p.GetBaseReplicas()
 	demandReplicas := int(p.demandReplicas.Load())
 	desiredReplicas := max(baseReplicas, demandReplicas)
+	if p.config.IdleReplicas > 0 {
+		desiredReplicas = max(desiredReplicas, int(p.busyReplicas.Load())+p.config.IdleReplicas)
+	}
 	p.desiredReplicas.Store(int32(desiredReplicas))
 	p.TriggerScale()
+}
+
+// updateBusyReplicas counts the machines whose runner has taken a job and
+// recomputes the desired size, so that IdleReplicas idle runners stay ready.
+// A runner that is starting, idle, or whose state cannot be read counts as
+// idle: guessing busy on an error could grow the pool without bound.
+func (p *Pool) updateBusyReplicas(ctx context.Context) {
+	p.machinesMu.Lock()
+	machines := make([]*Machine, 0, len(p.machines))
+	for _, machine := range p.machines {
+		if machine.stopping {
+			continue
+		}
+		machines = append(machines, machine)
+	}
+	p.machinesMu.Unlock()
+
+	var busy atomic.Int32
+	var wg sync.WaitGroup
+	for _, machine := range machines {
+		wg.Add(1)
+		go func(machine *Machine) {
+			defer wg.Done()
+			stateCtx, cancel := context.WithTimeout(ctx, busyStateTimeout)
+			defer cancel()
+			state, err := machine.GetRunnerState(stateCtx)
+			if err == nil && runnerStateIsBusy(state) {
+				busy.Add(1)
+			}
+		}(machine)
+	}
+	wg.Wait()
+
+	count := busy.Load()
+	metricPoolRunnersBusy.WithLabelValues(p.config.Name, p.config.Runner.Organization).Set(float64(count))
+	if p.busyReplicas.Swap(count) != count {
+		p.recomputeDesiredReplicas()
+	}
+}
+
+// runnerStateIsBusy reports whether a runner has taken a job. A runner that
+// completed or exited is about to leave the pool, so it is not idle either.
+func runnerStateIsBusy(state string) bool {
+	switch state {
+	case "Running", "Completed", "Exited", "Error":
+		return true
+	default:
+		return false
+	}
 }
 
 // TriggerScale sends a non-blocking notification to trigger scaling.

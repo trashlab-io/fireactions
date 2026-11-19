@@ -97,6 +97,23 @@ pools:
   #
   replicas: 5
   #
+  # Idle runners to keep ready on top of the runners that are running a job.
+  # A runner that takes a job is replaced right away, so a new job starts
+  # without waiting for the on-demand scan or a VM boot. Each idle runner
+  # reserves its full mem_size_mib and vcpu_count.
+  #
+  # Default: 0
+  #
+  idle_replicas: 0
+  #
+  # Put this pool ahead of every non-priority pool when capacity is short, and
+  # never hold its capacity back for a non-priority pool that has waited longer.
+  # Meant for a few small pools whose jobs must start quickly, such as deploys.
+  #
+  # Default: false
+  #
+  priority: false
+  #
   # Shutdown the Firecracker VM when the runner exits.
   #
   # Required: false, Default: true

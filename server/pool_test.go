@@ -436,6 +436,55 @@ func TestPoolScaleDoesNotDoubleCountSlowDelete(t *testing.T) {
 	close(stopRelease)
 }
 
+func TestPoolIdleReplicasKeepsSpareRunnersOnTopOfBusyOnes(t *testing.T) {
+	pool := newTestPool(t, "pool-idle", 2048, 2, NewCapacityManager(nil))
+	pool.config.IdleReplicas = 1
+	pool.recomputeDesiredReplicas()
+	assert.Equal(t, 1, pool.GetDesiredReplicas())
+
+	var state atomic.Value
+	state.Store("Idle")
+	stateErr := atomic.Bool{}
+	pool.machinesMu.Lock()
+	pool.machines["spare"] = &Machine{
+		Name: "spare",
+		Pool: pool.config.Name,
+		runnerStateFn: func(context.Context) (string, error) {
+			if stateErr.Load() {
+				return "", errors.New("agent not ready")
+			}
+			return state.Load().(string), nil
+		},
+	}
+	pool.machinesMu.Unlock()
+
+	pool.updateBusyReplicas(context.Background())
+	assert.Equal(t, 1, pool.GetDesiredReplicas(), "an idle spare is enough")
+
+	// The spare takes a job: keep one more idle runner ready.
+	state.Store("Running")
+	pool.updateBusyReplicas(context.Background())
+	assert.Equal(t, 2, pool.GetDesiredReplicas())
+
+	// Demand above busy+idle still wins.
+	pool.SetDemandReplicas(4)
+	assert.Equal(t, 4, pool.GetDesiredReplicas())
+	pool.SetDemandReplicas(0)
+	assert.Equal(t, 2, pool.GetDesiredReplicas())
+
+	// An unreadable runner state counts as idle so errors cannot grow the pool.
+	stateErr.Store(true)
+	pool.updateBusyReplicas(context.Background())
+	assert.Equal(t, 1, pool.GetDesiredReplicas())
+}
+
+func TestPoolWithoutIdleReplicasIgnoresBusyRunners(t *testing.T) {
+	pool := newTestPool(t, "pool-no-idle", 2048, 2, NewCapacityManager(nil))
+	pool.busyReplicas.Store(3)
+	pool.recomputeDesiredReplicas()
+	assert.Equal(t, 0, pool.GetDesiredReplicas())
+}
+
 func TestPoolScaleDownSelectsIdleMachinesOnly(t *testing.T) {
 	pool := newTestPool(t, "pool-busy-selection", 2048, 2, NewCapacityManager(nil))
 
